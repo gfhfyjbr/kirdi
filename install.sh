@@ -169,15 +169,15 @@ generate_config() {
 
     cat > "$CONFIG_DIR/server.json" <<EOF
 {
-    "listen_address": "127.0.0.1",
+    "listen_addr": "127.0.0.1",
     "listen_port": 8443,
     "ws_path": "${ws_path}",
-    "auth_token": "${token}",
-    "tun_subnet": "10.8.0.0/24",
-    "tun_device_name": "kirdi0",
-    "dns_servers": ["1.1.1.1", "8.8.8.8"],
+    "auth_secret": "${token}",
+    "tun_subnet": "10.8.0.0",
+    "tun_mask": "255.255.255.0",
+    "tun_server_ip": "10.8.0.1",
     "mtu": 1400,
-    "keepalive_interval": 25,
+    "keepalive_sec": 25,
     "tls_enabled": false,
     "log_level": "info"
 }

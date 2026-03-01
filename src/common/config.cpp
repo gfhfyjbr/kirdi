@@ -4,6 +4,19 @@
 
 namespace kirdi {
 
+// Helper: get value from json with primary key or fallback alias
+template<typename T>
+static void json_get(const nlohmann::json& j, const char* key, const char* alias, T& out) {
+    if (j.contains(key))        { j.at(key).get_to(out); return; }
+    if (alias && j.contains(alias)) { j.at(alias).get_to(out); return; }
+}
+
+// Helper: strip CIDR suffix from subnet string ("10.8.0.0/24" → "10.8.0.0")
+static std::string strip_cidr(const std::string& s) {
+    auto pos = s.find('/');
+    return (pos != std::string::npos) ? s.substr(0, pos) : s;
+}
+
 // ── ServerConfig JSON ───────────────────────────────────────────────────────
 
 void to_json(nlohmann::json& j, const ServerConfig& c) {
@@ -27,21 +40,25 @@ void to_json(nlohmann::json& j, const ServerConfig& c) {
 }
 
 void from_json(const nlohmann::json& j, ServerConfig& c) {
-    if (j.contains("listen_addr"))        j.at("listen_addr").get_to(c.listen_addr);
-    if (j.contains("listen_port"))        j.at("listen_port").get_to(c.listen_port);
-    if (j.contains("ws_path"))            j.at("ws_path").get_to(c.ws_path);
-    if (j.contains("tls_enabled"))        j.at("tls_enabled").get_to(c.tls_enabled);
-    if (j.contains("tls_cert_path"))      j.at("tls_cert_path").get_to(c.tls_cert_path);
-    if (j.contains("tls_key_path"))       j.at("tls_key_path").get_to(c.tls_key_path);
-    if (j.contains("tun_subnet"))         j.at("tun_subnet").get_to(c.tun_subnet);
-    if (j.contains("tun_mask"))           j.at("tun_mask").get_to(c.tun_mask);
-    if (j.contains("tun_server_ip"))      j.at("tun_server_ip").get_to(c.tun_server_ip);
-    if (j.contains("mtu"))                j.at("mtu").get_to(c.mtu);
-    if (j.contains("auth_secret"))        j.at("auth_secret").get_to(c.auth_secret);
-    if (j.contains("max_clients"))        j.at("max_clients").get_to(c.max_clients);
-    if (j.contains("keepalive_sec"))      j.at("keepalive_sec").get_to(c.keepalive_sec);
-    if (j.contains("session_timeout_sec")) j.at("session_timeout_sec").get_to(c.session_timeout_sec);
-    if (j.contains("log_level"))          j.at("log_level").get_to(c.log_level);
+    // Accept both canonical and common alias keys
+    json_get(j, "listen_addr",    "listen_address",      c.listen_addr);
+    json_get(j, "listen_port",    nullptr,               c.listen_port);
+    json_get(j, "ws_path",        nullptr,               c.ws_path);
+    json_get(j, "tls_enabled",    nullptr,               c.tls_enabled);
+    json_get(j, "tls_cert_path",  "tls_cert",            c.tls_cert_path);
+    json_get(j, "tls_key_path",   "tls_key",             c.tls_key_path);
+    json_get(j, "tun_subnet",     nullptr,               c.tun_subnet);
+    json_get(j, "tun_mask",       "tun_netmask",         c.tun_mask);
+    json_get(j, "tun_server_ip",  nullptr,               c.tun_server_ip);
+    json_get(j, "mtu",            nullptr,               c.mtu);
+    json_get(j, "auth_secret",    "auth_token",          c.auth_secret);
+    json_get(j, "max_clients",    nullptr,               c.max_clients);
+    json_get(j, "keepalive_sec",  "keepalive_interval",  c.keepalive_sec);
+    json_get(j, "session_timeout_sec", nullptr,           c.session_timeout_sec);
+    json_get(j, "log_level",      nullptr,               c.log_level);
+
+    // Strip CIDR notation from subnet if present ("10.8.0.0/24" → "10.8.0.0")
+    c.tun_subnet = strip_cidr(c.tun_subnet);
 }
 
 // ── ClientConfig JSON ───────────────────────────────────────────────────────
@@ -65,19 +82,19 @@ void to_json(nlohmann::json& j, const ClientConfig& c) {
 }
 
 void from_json(const nlohmann::json& j, ClientConfig& c) {
-    if (j.contains("server_host"))   j.at("server_host").get_to(c.server_host);
-    if (j.contains("server_port"))   j.at("server_port").get_to(c.server_port);
-    if (j.contains("ws_path"))       j.at("ws_path").get_to(c.ws_path);
-    if (j.contains("tls_enabled"))   j.at("tls_enabled").get_to(c.tls_enabled);
-    if (j.contains("sni_override"))  j.at("sni_override").get_to(c.sni_override);
-    if (j.contains("auth_user"))     j.at("auth_user").get_to(c.auth_user);
-    if (j.contains("auth_token"))    j.at("auth_token").get_to(c.auth_token);
-    if (j.contains("mtu"))           j.at("mtu").get_to(c.mtu);
-    if (j.contains("auto_route"))    j.at("auto_route").get_to(c.auto_route);
-    if (j.contains("dns_server"))    j.at("dns_server").get_to(c.dns_server);
-    if (j.contains("transport"))     j.at("transport").get_to(c.transport);
-    if (j.contains("keepalive_sec")) j.at("keepalive_sec").get_to(c.keepalive_sec);
-    if (j.contains("log_level"))     j.at("log_level").get_to(c.log_level);
+    json_get(j, "server_host",   "host",             c.server_host);
+    json_get(j, "server_port",   "port",             c.server_port);
+    json_get(j, "ws_path",       "path",             c.ws_path);
+    json_get(j, "tls_enabled",   nullptr,            c.tls_enabled);
+    json_get(j, "sni_override",  "sni",              c.sni_override);
+    json_get(j, "auth_user",     "user",             c.auth_user);
+    json_get(j, "auth_token",    "token",            c.auth_token);
+    json_get(j, "mtu",           nullptr,            c.mtu);
+    json_get(j, "auto_route",    nullptr,            c.auto_route);
+    json_get(j, "dns_server",    "dns",              c.dns_server);
+    json_get(j, "transport",     nullptr,            c.transport);
+    json_get(j, "keepalive_sec", "keepalive",        c.keepalive_sec);
+    json_get(j, "log_level",     nullptr,            c.log_level);
 }
 
 // ── File Parsers ────────────────────────────────────────────────────────────

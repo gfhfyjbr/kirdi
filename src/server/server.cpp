@@ -45,6 +45,9 @@ std::string Server::allocate_client_ip() {
 
 void Server::run() {
     LOG_INFOF("kirdi server v{} starting", KIRDI_VERSION_STRING);
+    LOG_INFOF("Config: listen={}:{} tls={} tun_subnet={} tun_ip={} tun_mask={} ws_path={}",
+              config_.listen_addr, config_.listen_port, config_.tls_enabled,
+              config_.tun_subnet, config_.tun_server_ip, config_.tun_mask, config_.ws_path);
 
     setup_tls();
 
@@ -233,6 +236,13 @@ void Server::route_to_client(const uint8_t* data, size_t len) {
 
     uint32_t dst_ip = protocol::ip4_dst({data, len});
 
+    // Debug: log dest IP in dotted notation
+    struct in_addr da{};
+    da.s_addr = dst_ip;
+    char dst_str[INET_ADDRSTRLEN];
+    inet_ntop(AF_INET, &da, dst_str, sizeof(dst_str));
+    LOG_DEBUGF("TUN->client: {} bytes dst={}", len, dst_str);
+
     std::lock_guard<std::mutex> lock(sessions_mutex_);
     auto it = ip_to_session_.find(dst_ip);
     if (it != ip_to_session_.end()) {
@@ -240,6 +250,8 @@ void Server::route_to_client(const uint8_t* data, size_t len) {
         if (sit != sessions_.end() && sit->second->is_authenticated()) {
             sit->second->send_ip_packet(data, len);
         }
+    } else {
+        LOG_DEBUGF("TUN->client: no session for dst={}", dst_str);
     }
 }
 

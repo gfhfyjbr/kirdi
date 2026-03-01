@@ -44,9 +44,10 @@ void ClientSession::handle_packet(const protocol::PacketHeader& hdr, std::vector
 
         case protocol::MsgType::IpPacket:
             if (!authenticated_) {
-                LOG_WARNF("Session {} sent IP packet before auth — dropping", id_);
+                LOG_WARNF("Session {} sent IP packet before auth -- dropping", id_);
                 return;
             }
+            LOG_DEBUGF("Session {} rx IP packet: {} bytes", id_, payload.size());
             if (on_ip_packet_) {
                 on_ip_packet_(id_, std::move(payload));
             }
