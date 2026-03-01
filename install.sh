@@ -6,7 +6,7 @@ set -euo pipefail
 # Запуск:  curl -fsSL https://raw.githubusercontent.com/paranoikcodit/kirdi/main/install.sh | sudo bash
 # Или:     wget -qO- https://raw.githubusercontent.com/paranoikcodit/kirdi/main/install.sh | sudo bash
 
-REPO="https://github.com/paranoikcodit/kirdi.git"
+REPO="https://github.com/gfhfyjbr/kirdi.git"
 BRANCH="main"
 BUILD_DIR="/tmp/kirdi-build"
 INSTALL_PREFIX="/usr/local"
