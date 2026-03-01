@@ -18,7 +18,7 @@ using OnIpPacketCallback = std::function<void(uint32_t session_id, std::vector<u
 class ClientSession {
 public:
     ClientSession(uint32_t id, const std::string& virtual_ip,
-                  std::shared_ptr<transport::WsServerSession> ws);
+                  std::shared_ptr<transport::IWsSession> ws);
 
     uint32_t id() const { return id_; }
     const std::string& virtual_ip() const { return virtual_ip_; }
@@ -44,7 +44,7 @@ private:
     std::string virtual_ip_;
     uint32_t virtual_ip_n_;  // Network byte order for fast lookup
     bool authenticated_ = false;
-    std::shared_ptr<transport::WsServerSession> ws_;
+    std::shared_ptr<transport::IWsSession> ws_;
     OnIpPacketCallback on_ip_packet_;
 
     void handle_packet(const protocol::PacketHeader& hdr, std::vector<uint8_t> payload);

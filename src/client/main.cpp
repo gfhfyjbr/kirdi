@@ -6,12 +6,17 @@
 #include <iostream>
 #include <csignal>
 #include <memory>
+#include <atomic>
 
 static std::unique_ptr<kirdi::client::Client> g_client;
+static std::atomic<bool> g_shutdown{false};
 
 static void signal_handler(int sig) {
+    if (g_shutdown.exchange(true)) return;  // prevent double-stop
     LOG_INFOF("Signal {} received, shutting down", sig);
-    if (g_client) g_client->stop();
+    try {
+        if (g_client) g_client->stop();
+    } catch (...) {}
 }
 
 static void print_usage(const char* argv0) {
@@ -34,7 +39,6 @@ static void print_usage(const char* argv0) {
 int main(int argc, char* argv[]) {
     kirdi::ClientConfig config;
 
-    // Parse CLI args
     for (int i = 1; i < argc; ++i) {
         std::string arg = argv[i];
 
@@ -43,7 +47,6 @@ int main(int argc, char* argv[]) {
             return 0;
         }
 
-        // If first arg doesn't start with --, treat as config file
         if (i == 1 && arg[0] != '-') {
             try {
                 config = kirdi::parse_client_config(arg);
@@ -74,7 +77,6 @@ int main(int argc, char* argv[]) {
         }
     }
 
-    // Validate
     if (config.server_host.empty()) {
         std::cerr << "Error: --host is required\n";
         print_usage(argv[0]);
@@ -86,19 +88,22 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
-    // Set log level
     if (config.log_level == "trace")      kirdi::Logger::instance().set_level(kirdi::LogLevel::Trace);
     else if (config.log_level == "debug") kirdi::Logger::instance().set_level(kirdi::LogLevel::Debug);
     else if (config.log_level == "warn")  kirdi::Logger::instance().set_level(kirdi::LogLevel::Warn);
     else if (config.log_level == "error") kirdi::Logger::instance().set_level(kirdi::LogLevel::Error);
 
-    // Setup signal handlers
     std::signal(SIGINT, signal_handler);
     std::signal(SIGTERM, signal_handler);
 
-    // Run client
     g_client = std::make_unique<kirdi::client::Client>(std::move(config));
-    g_client->run();
 
+    try {
+        g_client->run();
+    } catch (const std::exception& e) {
+        LOG_ERRORF("Fatal: {}", e.what());
+    }
+
+    g_client.reset();
     return 0;
 }

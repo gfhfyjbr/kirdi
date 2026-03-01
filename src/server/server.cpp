@@ -2,6 +2,8 @@
 #include "common/logger.hpp"
 #include <kirdi/version.hpp>
 
+#include <boost/beast/http.hpp>
+
 #include <thread>
 #include <arpa/inet.h>
 
@@ -30,7 +32,6 @@ void Server::setup_tls() {
 std::string Server::allocate_client_ip() {
     uint32_t offset = next_client_ip_offset_.fetch_add(1);
 
-    // Parse subnet base
     struct in_addr base{};
     inet_pton(AF_INET, config_.tun_subnet.c_str(), &base);
     uint32_t ip_host = ntohl(base.s_addr) + offset;
@@ -45,7 +46,6 @@ std::string Server::allocate_client_ip() {
 void Server::run() {
     LOG_INFOF("kirdi server v{} starting", KIRDI_VERSION_STRING);
 
-    // Setup TLS if standalone
     setup_tls();
 
     // Create and configure TUN device
@@ -73,11 +73,12 @@ void Server::run() {
     acceptor_.bind(ep);
     acceptor_.listen(net::socket_base::max_listen_connections);
 
-    LOG_INFOF("Listening on {}:{}", config_.listen_addr, config_.listen_port);
+    LOG_INFOF("Listening on {}:{} (tls={})", config_.listen_addr, config_.listen_port,
+              config_.tls_enabled ? "on" : "off");
 
     do_accept();
 
-    // Run the I/O context (blocks)
+    // Run I/O context
     auto threads = std::max(1u, std::thread::hardware_concurrency());
     std::vector<std::thread> io_threads;
     for (unsigned i = 1; i < threads; ++i) {
@@ -103,19 +104,22 @@ void Server::do_accept() {
 void Server::on_accept(beast::error_code ec, tcp::socket socket) {
     if (ec) {
         LOG_ERRORF("Accept error: {}", ec.message());
-    } else {
-        uint32_t sid = next_session_id_.fetch_add(1);
-        std::string client_ip = allocate_client_ip();
+        do_accept();
+        return;
+    }
 
-        LOG_INFOF("New connection from {} → session {} (vip={})",
-                  socket.remote_endpoint().address().to_string(), sid, client_ip);
+    uint32_t sid = next_session_id_.fetch_add(1);
+    std::string client_ip = allocate_client_ip();
 
-        // Create SSL stream → WS stream → session
+    LOG_INFOF("New connection from {} -> session {} (vip={})",
+              socket.remote_endpoint().address().to_string(), sid, client_ip);
+
+    if (config_.tls_enabled) {
+        // ── Standalone mode: do SSL handshake, then WS accept ──────────────
         auto ssl_stream = std::make_unique<beast::ssl_stream<beast::tcp_stream>>(
             std::move(socket), ssl_ctx_
         );
 
-        // Async SSL handshake
         ssl_stream->async_handshake(
             ssl::stream_base::server,
             [this, sid, client_ip, ssl_stream = std::move(ssl_stream)]
@@ -125,51 +129,81 @@ void Server::on_accept(beast::error_code ec, tcp::socket socket) {
                     return;
                 }
 
-                // Create WebSocket stream
                 auto ws = transport::WsServerSession::ws_stream(std::move(*ssl_stream));
 
-                // Accept WebSocket upgrade
                 ws.set_option(boost::beast::websocket::stream_base::timeout::suggested(
                     beast::role_type::server
                 ));
                 ws.binary(true);
 
                 ws.async_accept(
-                    [this, sid, client_ip, ws = std::make_shared<transport::WsServerSession::ws_stream>(std::move(ws))]
+                    [this, sid, client_ip,
+                     ws = std::make_shared<transport::WsServerSession::ws_stream>(std::move(ws))]
                     (beast::error_code ec) mutable {
                         if (ec) {
                             LOG_WARNF("Session {} WS accept failed: {}", sid, ec.message());
                             return;
                         }
-
-                        auto ws_session = std::make_shared<transport::WsServerSession>(std::move(*ws), sid);
-                        auto session = std::make_shared<ClientSession>(sid, client_ip, ws_session);
-
-                        session->on_ip_packet([this](uint32_t sid, std::vector<uint8_t> pkt) {
-                            // Write client's IP packet to TUN → internet
-                            if (tun_ && tun_->is_open()) {
-                                tun_->write_packet(pkt.data(), pkt.size());
-                            }
-                        });
-
-                        {
-                            std::lock_guard<std::mutex> lock(sessions_mutex_);
-                            sessions_[sid] = session;
-
-                            // Register IP → session mapping
-                            struct in_addr addr{};
-                            inet_pton(AF_INET, client_ip.c_str(), &addr);
-                            ip_to_session_[addr.s_addr] = sid;
-                        }
-
-                        session->start();
+                        auto session = std::make_shared<transport::WsServerSession>(std::move(*ws), sid);
+                        register_session(sid, client_ip, session);
                     }
                 );
+            }
+        );
+    } else {
+        // ── Behind nginx: plain WebSocket (no SSL) ─────────────────────────
+        auto ws = std::make_shared<transport::WsPlainServerSession::ws_stream>(
+            std::move(socket)
+        );
+
+        ws->set_option(boost::beast::websocket::stream_base::timeout::suggested(
+            beast::role_type::server
+        ));
+        ws->binary(true);
+
+        // Accept the WebSocket handshake, validating the path
+        ws->set_option(websocket::stream_base::decorator(
+            [this](websocket::response_type& res) {
+                res.set(boost::beast::http::field::server, "kirdi");
+            }
+        ));
+
+        ws->async_accept(
+            [this, sid, client_ip, ws](beast::error_code ec) mutable {
+                if (ec) {
+                    LOG_WARNF("Session {} WS accept failed: {}", sid, ec.message());
+                    return;
+                }
+                auto session = std::make_shared<transport::WsPlainServerSession>(std::move(*ws), sid);
+                register_session(sid, client_ip, session);
             }
         );
     }
 
     do_accept();
+}
+
+void Server::register_session(uint32_t sid, const std::string& client_ip,
+                               std::shared_ptr<transport::IWsSession> ws_session) {
+    auto session = std::make_shared<ClientSession>(sid, client_ip, ws_session);
+
+    session->on_ip_packet([this](uint32_t id, std::vector<uint8_t> pkt) {
+        if (tun_ && tun_->is_open()) {
+            tun_->write_packet(pkt.data(), pkt.size());
+        }
+    });
+
+    {
+        std::lock_guard<std::mutex> lock(sessions_mutex_);
+        sessions_[sid] = session;
+
+        struct in_addr addr{};
+        inet_pton(AF_INET, client_ip.c_str(), &addr);
+        ip_to_session_[addr.s_addr] = sid;
+    }
+
+    session->start();
+    LOG_INFOF("Session {} registered with vip={}", sid, client_ip);
 }
 
 void Server::tun_read_loop() {
@@ -195,9 +229,8 @@ void Server::tun_read_loop() {
 }
 
 void Server::route_to_client(const uint8_t* data, size_t len) {
-    if (len < 20) return;  // Too small for IPv4
+    if (len < 20) return;
 
-    // Extract destination IP from IPv4 header
     uint32_t dst_ip = protocol::ip4_dst({data, len});
 
     std::lock_guard<std::mutex> lock(sessions_mutex_);

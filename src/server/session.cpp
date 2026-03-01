@@ -6,7 +6,7 @@
 namespace kirdi::server {
 
 ClientSession::ClientSession(uint32_t id, const std::string& virtual_ip,
-                             std::shared_ptr<transport::WsServerSession> ws)
+                             std::shared_ptr<transport::IWsSession> ws)
     : id_(id), virtual_ip_(virtual_ip), ws_(std::move(ws))
 {
     // Convert string IP to network byte order uint32_t

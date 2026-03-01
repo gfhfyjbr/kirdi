@@ -22,29 +22,15 @@ namespace kirdi::server {
 namespace net = boost::asio;
 namespace ssl = net::ssl;
 namespace beast = boost::beast;
+namespace websocket = beast::websocket;
 using tcp = net::ip::tcp;
-
-// ── Kirdi Server ────────────────────────────────────────────────────────────
-//
-// Accepts WebSocket connections (behind nginx or standalone with TLS).
-// Each client gets a virtual IP from the configured subnet.
-// Server creates a TUN device and forwards IP packets between
-// clients and the internet via NAT (iptables MASQUERADE on Linux).
-//
-// Data flow:
-//   Client WS → parse protocol → extract IP packet → write to TUN
-//   TUN → read IP packet → find session by dest IP → send via WS
-// ─────────────────────────────────────────────────────────────────────────────
 
 class Server {
 public:
     explicit Server(ServerConfig config);
     ~Server();
 
-    // Start accepting connections (blocks until stopped)
     void run();
-
-    // Stop the server gracefully
     void stop();
 
 private:
@@ -53,31 +39,26 @@ private:
     ssl::context ssl_ctx_{ssl::context::tlsv12};
     tcp::acceptor acceptor_{ioc_};
 
-    // TUN device for packet forwarding
+    // TUN device
     std::unique_ptr<tun::TunDevice> tun_;
 
-    // Active sessions: session_id → session
+    // Active sessions
     std::unordered_map<uint32_t, std::shared_ptr<ClientSession>> sessions_;
-    // IP → session_id mapping for routing return packets
     std::unordered_map<uint32_t, uint32_t> ip_to_session_;
     std::mutex sessions_mutex_;
     std::atomic<uint32_t> next_session_id_{1};
-    std::atomic<uint32_t> next_client_ip_offset_{2};  // .2, .3, .4, ...
+    std::atomic<uint32_t> next_client_ip_offset_{2};
 
-    // Accept loop
     void do_accept();
     void on_accept(beast::error_code ec, tcp::socket socket);
 
-    // TUN read loop (runs in separate thread)
+    // Register a new authenticated session (shared by SSL and plain paths)
+    void register_session(uint32_t sid, const std::string& client_ip,
+                          std::shared_ptr<transport::IWsSession> ws_session);
+
     void tun_read_loop();
-
-    // Assign virtual IP to new client
     std::string allocate_client_ip();
-
-    // Route a packet from TUN to the correct client session
     void route_to_client(const uint8_t* data, size_t len);
-
-    // Setup TLS context (if running standalone)
     void setup_tls();
 };
 
