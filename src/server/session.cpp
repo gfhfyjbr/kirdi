@@ -1,6 +1,7 @@
 #include "server/session.hpp"
 #include "common/logger.hpp"
 
+#include <nlohmann/json.hpp>
 #include <arpa/inet.h>
 
 namespace kirdi::server {
@@ -28,15 +29,22 @@ void ClientSession::start() {
 void ClientSession::handle_packet(const protocol::PacketHeader& hdr, std::vector<uint8_t> payload) {
     switch (hdr.type) {
         case protocol::MsgType::AuthRequest:
-            // TODO: Validate HMAC token, set authenticated_ = true
             LOG_INFOF("Session {} auth request (len={})", id_, payload.size());
-            authenticated_ = true;  // Placeholder — implement proper auth
+            authenticated_ = true;  // TODO: validate HMAC token
             {
-                // Send auth response with TUN config
-                std::string resp = R"({"ok":true,"tun_ip":")" + virtual_ip_ + R"("})";
+                // Send auth response with full TUN config
+                nlohmann::json resp = {
+                    {"ok", true},
+                    {"tun_ip", virtual_ip_},
+                    {"tun_server_ip", tun_info_.server_ip},
+                    {"tun_mask", tun_info_.mask},
+                    {"mtu", tun_info_.mtu},
+                };
+                std::string resp_str = resp.dump();
+                LOG_INFOF("Session {} auth response: {}", id_, resp_str);
                 auto pkt = protocol::build_packet(
                     protocol::MsgType::AuthResponse,
-                    {reinterpret_cast<const uint8_t*>(resp.data()), resp.size()}
+                    {reinterpret_cast<const uint8_t*>(resp_str.data()), resp_str.size()}
                 );
                 ws_->send(std::move(pkt));
             }

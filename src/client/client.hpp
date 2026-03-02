@@ -47,6 +47,8 @@ private:
 
     std::atomic<bool> running_{false};
     std::string virtual_ip_;
+    std::string server_ip_;          // Resolved server IP (for route exclusion)
+    std::string original_gateway_;   // Original default gateway (saved before route change)
 
     // WebSocket callbacks
     void on_connected();

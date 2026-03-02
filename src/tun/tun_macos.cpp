@@ -156,11 +156,12 @@ std::expected<size_t, TunError> MacOSTunDevice::write_packet(const uint8_t* data
 
 std::expected<void, TunError> MacOSTunDevice::configure_address(const TunConfig& config) {
     // macOS: use ifconfig to set address and bring up
-    // ifconfig utunN inet ADDR PEER_ADDR netmask MASK mtu MTU up
-    // For point-to-point: peer = server IP (config.address is our side)
+    // ifconfig utunN inet LOCAL PEER netmask MASK mtu MTU up
+    // peer_address is the server-side TUN IP for point-to-point routing
+    std::string peer = config.peer_address.empty() ? config.address : config.peer_address;
     std::string cmd = "ifconfig " + if_name_
         + " inet " + config.address
-        + " " + config.address  // peer address (point-to-point)
+        + " " + peer
         + " netmask " + config.netmask
         + " mtu " + std::to_string(config.mtu)
         + " up";

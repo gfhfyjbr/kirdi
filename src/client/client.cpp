@@ -6,6 +6,8 @@
 #include <nlohmann/json.hpp>
 #include <chrono>
 #include <thread>
+#include <netdb.h>
+#include <arpa/inet.h>
 
 namespace kirdi::client {
 
@@ -16,9 +18,57 @@ Client::~Client() {
     try { stop(); } catch (...) {}
 }
 
+// Resolve hostname to IP string (needed for route exclusion)
+static std::string resolve_host(const std::string& host) {
+    struct addrinfo hints{}, *res = nullptr;
+    hints.ai_family = AF_INET;
+    hints.ai_socktype = SOCK_STREAM;
+    if (getaddrinfo(host.c_str(), nullptr, &hints, &res) != 0 || !res) {
+        return host;  // fallback: assume it's already an IP
+    }
+    char ip[INET_ADDRSTRLEN];
+    auto* sa = reinterpret_cast<struct sockaddr_in*>(res->ai_addr);
+    inet_ntop(AF_INET, &sa->sin_addr, ip, sizeof(ip));
+    freeaddrinfo(res);
+    return std::string(ip);
+}
+
+// Get current default gateway IP
+static std::string get_default_gateway() {
+#if defined(KIRDI_PLATFORM_MACOS)
+    // macOS: route -n get default
+    FILE* fp = popen("route -n get default 2>/dev/null | grep gateway | awk '{print $2}'", "r");
+    if (!fp) return "";
+    char buf[128] = {};
+    if (fgets(buf, sizeof(buf), fp)) {
+        // strip newline
+        for (char* p = buf; *p; ++p) if (*p == '\n' || *p == '\r') *p = 0;
+    }
+    pclose(fp);
+    return std::string(buf);
+#elif defined(KIRDI_PLATFORM_LINUX)
+    FILE* fp = popen("ip route show default 2>/dev/null | awk '/default/ {print $3}'", "r");
+    if (!fp) return "";
+    char buf[128] = {};
+    if (fgets(buf, sizeof(buf), fp)) {
+        for (char* p = buf; *p; ++p) if (*p == '\n' || *p == '\r') *p = 0;
+    }
+    pclose(fp);
+    return std::string(buf);
+#else
+    return "";
+#endif
+}
+
 void Client::run() {
     LOG_INFOF("kirdi client v{} starting", KIRDI_VERSION_STRING);
     running_ = true;
+
+    // Resolve server IP and get gateway BEFORE connecting
+    // (needed later for route exclusion to prevent routing loop)
+    server_ip_ = resolve_host(config_.server_host);
+    original_gateway_ = get_default_gateway();
+    LOG_INFOF("Server IP: {} ({}), default gateway: {}", server_ip_, config_.server_host, original_gateway_);
 
     // Configure TLS
     ssl_ctx_.set_default_verify_paths();
@@ -43,19 +93,13 @@ void Client::run() {
 }
 
 void Client::stop() {
-    if (!running_.exchange(false)) return;  // already stopped
+    if (!running_.exchange(false)) return;
 
     LOG_INFO("Client stopping");
 
-    // Close WS first (signals io_context to wind down)
-    if (ws_) {
-        ws_->close();
-    }
-
-    // Stop io_context
+    if (ws_) ws_->close();
     ioc_.stop();
 
-    // Teardown routes and TUN
     try { teardown_routes(); } catch (...) {}
     if (tun_) {
         try { tun_->close(); } catch (...) {}
@@ -96,14 +140,20 @@ void Client::on_packet(const protocol::PacketHeader& hdr, std::vector<uint8_t> p
                 auto j = nlohmann::json::parse(payload.begin(), payload.end());
                 if (j.value("ok", false)) {
                     virtual_ip_ = j.value("tun_ip", "10.8.0.2");
-                    LOG_INFOF("Authenticated! Virtual IP: {}", virtual_ip_);
+                    std::string server_tun_ip = j.value("tun_server_ip", "10.8.0.1");
+                    std::string tun_mask = j.value("tun_mask", "255.255.255.0");
+                    uint32_t tun_mtu = j.value("mtu", config_.mtu);
+
+                    LOG_INFOF("Authenticated! VIP={} server_tun={} mask={} mtu={}",
+                              virtual_ip_, server_tun_ip, tun_mask, tun_mtu);
 
                     tun_ = tun::create_tun_device();
                     tun::TunConfig tun_cfg{
                         .name = "kirdi0",
                         .address = virtual_ip_,
-                        .netmask = "255.255.255.0",
-                        .mtu = config_.mtu,
+                        .peer_address = server_tun_ip,
+                        .netmask = tun_mask,
+                        .mtu = tun_mtu,
                     };
 
                     auto result = tun_->open(tun_cfg);
@@ -186,28 +236,54 @@ void Client::setup_routes() {
 
     std::string iface = tun_->interface_name();
 
-#if defined(KIRDI_PLATFORM_LINUX)
-    std::string cmd;
-    cmd = "ip route add " + config_.server_host + "/32 via $(ip route | grep default | awk '{print $3}') 2>/dev/null || true";
-    std::system(cmd.c_str());
+    if (server_ip_.empty() || original_gateway_.empty()) {
+        LOG_ERROR("Cannot setup routes: server IP or gateway unknown");
+        return;
+    }
 
+    LOG_INFOF("Route exclusion: {} via gateway {}", server_ip_, original_gateway_);
+
+#if defined(KIRDI_PLATFORM_LINUX)
+    // 1. Exclude server IP from tunnel (MUST succeed before adding catch-all)
+    std::string cmd = "ip route add " + server_ip_ + "/32 via " + original_gateway_;
+    LOG_DEBUGF("Running: {}", cmd);
+    int ret = std::system(cmd.c_str());
+    if (ret != 0) {
+        LOG_WARNF("Failed to add server exclude route (ret={}), trying with metric", ret);
+        cmd = "ip route add " + server_ip_ + "/32 via " + original_gateway_ + " metric 0";
+        std::system(cmd.c_str());
+    }
+
+    // 2. Add catch-all routes through TUN
     cmd = "ip route add 0.0.0.0/1 dev " + iface;
+    LOG_DEBUGF("Running: {}", cmd);
     std::system(cmd.c_str());
 
     cmd = "ip route add 128.0.0.0/1 dev " + iface;
+    LOG_DEBUGF("Running: {}", cmd);
     std::system(cmd.c_str());
 
     LOG_INFO("Routes configured via ip route");
 
 #elif defined(KIRDI_PLATFORM_MACOS)
-    std::string cmd;
-    cmd = "route add -host " + config_.server_host + " $(route -n get default | grep gateway | awk '{print $2}') 2>/dev/null || true";
+    // 1. Exclude server IP from tunnel — route to server via original gateway
+    //    This MUST succeed, otherwise we get a routing loop!
+    std::string cmd = "route -n add -host " + server_ip_ + " " + original_gateway_;
+    LOG_DEBUGF("Running: {}", cmd);
+    int ret = std::system(cmd.c_str());
+    if (ret != 0) {
+        LOG_ERRORF("CRITICAL: Failed to add server exclude route (ret={})", ret);
+        LOG_ERROR("Aborting route setup to prevent routing loop");
+        return;
+    }
+
+    // 2. Add catch-all routes through TUN
+    cmd = "route -n add -net 0.0.0.0/1 -interface " + iface;
+    LOG_DEBUGF("Running: {}", cmd);
     std::system(cmd.c_str());
 
-    cmd = "route add -net 0.0.0.0/1 -interface " + iface;
-    std::system(cmd.c_str());
-
-    cmd = "route add -net 128.0.0.0/1 -interface " + iface;
+    cmd = "route -n add -net 128.0.0.0/1 -interface " + iface;
+    LOG_DEBUGF("Running: {}", cmd);
     std::system(cmd.c_str());
 
     LOG_INFO("Routes configured via route command");
@@ -215,21 +291,24 @@ void Client::setup_routes() {
 }
 
 void Client::teardown_routes() {
-    if (!config_.auto_route || !tun_ || !tun_->is_open()) return;
+    if (!config_.auto_route) return;
 
     LOG_INFO("Removing tunnel routes");
-    std::string iface = tun_->interface_name();
 
 #if defined(KIRDI_PLATFORM_LINUX)
     std::system("ip route del 0.0.0.0/1 2>/dev/null || true");
     std::system("ip route del 128.0.0.0/1 2>/dev/null || true");
-    std::string cmd = "ip route del " + config_.server_host + "/32 2>/dev/null || true";
-    std::system(cmd.c_str());
+    if (!server_ip_.empty()) {
+        std::string cmd = "ip route del " + server_ip_ + "/32 2>/dev/null || true";
+        std::system(cmd.c_str());
+    }
 #elif defined(KIRDI_PLATFORM_MACOS)
-    std::system("route delete -net 0.0.0.0/1 2>/dev/null || true");
-    std::system("route delete -net 128.0.0.0/1 2>/dev/null || true");
-    std::string cmd = "route delete -host " + config_.server_host + " 2>/dev/null || true";
-    std::system(cmd.c_str());
+    std::system("route -n delete -net 0.0.0.0/1 2>/dev/null || true");
+    std::system("route -n delete -net 128.0.0.0/1 2>/dev/null || true");
+    if (!server_ip_.empty()) {
+        std::string cmd = "route -n delete -host " + server_ip_ + " 2>/dev/null || true";
+        std::system(cmd.c_str());
+    }
 #endif
 }
 

@@ -189,6 +189,11 @@ void Server::on_accept(beast::error_code ec, tcp::socket socket) {
 void Server::register_session(uint32_t sid, const std::string& client_ip,
                                std::shared_ptr<transport::IWsSession> ws_session) {
     auto session = std::make_shared<ClientSession>(sid, client_ip, ws_session);
+    session->set_tun_info({
+        .server_ip = config_.tun_server_ip,
+        .mask = config_.tun_mask,
+        .mtu = config_.mtu,
+    });
 
     session->on_ip_packet([this](uint32_t id, std::vector<uint8_t> pkt) {
         if (tun_ && tun_->is_open()) {

@@ -24,6 +24,7 @@ namespace kirdi::tun {
 struct TunConfig {
     std::string name;           // Desired interface name (e.g. "kirdi0"), empty = auto
     std::string address;        // IPv4 address (e.g. "10.8.0.2")
+    std::string peer_address;   // Peer IP for point-to-point (e.g. "10.8.0.1"), macOS utun needs this
     std::string netmask;        // Netmask (e.g. "255.255.255.0")
     uint32_t    mtu = 1400;     // MTU (leave room for WS + TLS overhead)
 };
