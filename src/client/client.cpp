@@ -8,6 +8,7 @@
 #include <thread>
 #include <netdb.h>
 #include <arpa/inet.h>
+#include <poll.h>
 
 namespace kirdi::client {
 
@@ -260,19 +261,17 @@ void Client::tun_read_loop() {
     LOG_INFO("TUN read loop started");
 
     while (running_.load() && tun_ && tun_->is_open()) {
+        // Wait for data on TUN fd instead of polling with sleep
+        struct pollfd pfd{};
+        pfd.fd = tun_->native_fd();
+        pfd.events = POLLIN;
+        int ret = ::poll(&pfd, 1, 100);  // 100ms timeout to check running_ flag
+        if (ret <= 0) continue;
+
         auto result = tun_->read_packet();
-        if (!result) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(1));
-            continue;
-        }
+        if (!result || result.value().empty()) continue;
 
-        auto& pkt = result.value();
-        if (pkt.empty()) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(1));
-            continue;
-        }
-
-        auto ws_pkt = protocol::build_ip_packet(pkt);
+        auto ws_pkt = protocol::build_ip_packet(result.value());
         if (ws_ && ws_->is_connected()) {
             ws_->send(std::move(ws_pkt));
         }

@@ -8,6 +8,7 @@
 #include <arpa/inet.h>
 #include <cstdlib>
 #include <fstream>
+#include <poll.h>
 
 namespace kirdi::server {
 
@@ -180,6 +181,9 @@ void Server::on_accept(beast::error_code ec, tcp::socket socket) {
         return;
     }
 
+    // Disable Nagle — send packets immediately, critical for VPN latency
+    socket.set_option(tcp::no_delay(true));
+
     uint32_t sid = next_session_id_.fetch_add(1);
     std::string client_ip = allocate_client_ip();
 
@@ -288,19 +292,17 @@ void Server::tun_read_loop() {
     LOG_INFO("TUN read loop started");
 
     while (tun_ && tun_->is_open()) {
+        // Wait for data on TUN fd instead of polling with sleep
+        struct pollfd pfd{};
+        pfd.fd = tun_->native_fd();
+        pfd.events = POLLIN;
+        int ret = ::poll(&pfd, 1, 100);  // 100ms timeout to check tun_->is_open()
+        if (ret <= 0) continue;
+
         auto result = tun_->read_packet();
-        if (!result) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(1));
-            continue;
-        }
+        if (!result || result.value().empty()) continue;
 
-        auto& pkt = result.value();
-        if (pkt.empty()) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(1));
-            continue;
-        }
-
-        route_to_client(pkt.data(), pkt.size());
+        route_to_client(result.value().data(), result.value().size());
     }
 
     LOG_INFO("TUN read loop ended");

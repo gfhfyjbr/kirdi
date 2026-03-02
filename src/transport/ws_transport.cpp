@@ -63,6 +63,9 @@ void WsClientTransport::on_resolved(beast::error_code ec, tcp::resolver::results
 void WsClientTransport::on_tcp_connect(beast::error_code ec, tcp::resolver::results_type::endpoint_type ep) {
     if (ec) return fail(ec, "tcp_connect");
 
+    // Disable Nagle — send packets immediately, critical for VPN latency
+    beast::get_lowest_layer(*ws_).socket().set_option(tcp::no_delay(true));
+
     if (!SSL_set_tlsext_host_name(ws_->next_layer().native_handle(), host_.c_str())) {
         return fail(beast::error_code(static_cast<int>(::ERR_get_error()), net::error::get_ssl_category()), "ssl_sni");
     }
