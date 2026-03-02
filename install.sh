@@ -241,6 +241,16 @@ setup_nat() {
     iface=$(ip route show default 2>/dev/null | awk '/default/ {print $5}' | head -1)
     [[ -n "$iface" ]] || iface="eth0"
 
+    # FORWARD: разрешаем форвардинг для kirdi TUN
+    if ! iptables -C FORWARD -i kirdi0 -j ACCEPT 2>/dev/null; then
+        iptables -A FORWARD -i kirdi0 -j ACCEPT
+        log "добавлено FORWARD правило: kirdi0 -> ACCEPT"
+    fi
+    if ! iptables -C FORWARD -o kirdi0 -m state --state RELATED,ESTABLISHED -j ACCEPT 2>/dev/null; then
+        iptables -A FORWARD -o kirdi0 -m state --state RELATED,ESTABLISHED -j ACCEPT
+        log "добавлено FORWARD правило: -> kirdi0 (RELATED,ESTABLISHED)"
+    fi
+
     # NAT для подсети kirdi
     if ! iptables -t nat -C POSTROUTING -s 10.8.0.0/24 -o "$iface" -j MASQUERADE 2>/dev/null; then
         iptables -t nat -A POSTROUTING -s 10.8.0.0/24 -o "$iface" -j MASQUERADE

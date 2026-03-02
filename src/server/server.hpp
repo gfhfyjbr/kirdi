@@ -60,6 +60,7 @@ private:
     std::string allocate_client_ip();
     void route_to_client(const uint8_t* data, size_t len);
     void setup_tls();
+    void ensure_system_config();
 };
 
 } // namespace kirdi::server

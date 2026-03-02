@@ -46,9 +46,12 @@ private:
     std::unique_ptr<tun::TunDevice> tun_;
 
     std::atomic<bool> running_{false};
+    std::atomic<bool> connected_{false};
     std::string virtual_ip_;
     std::string server_ip_;          // Resolved server IP (for route exclusion)
     std::string original_gateway_;   // Original default gateway (saved before route change)
+    uint32_t reconnect_attempt_{0};
+    static constexpr uint32_t MAX_RECONNECT_DELAY_SEC = 60;
 
     // WebSocket callbacks
     void on_connected();
@@ -64,6 +67,13 @@ private:
     // Configure routes (platform-specific)
     void setup_routes();
     void teardown_routes();
+
+    // DNS management
+    void setup_dns();
+    void teardown_dns();
+
+    // Reconnection
+    void schedule_reconnect();
 };
 
 } // namespace kirdi::client

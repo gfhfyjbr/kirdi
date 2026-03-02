@@ -141,19 +141,18 @@ void WsClientTransport::on_read(beast::error_code ec, std::size_t bytes) {
 void WsClientTransport::do_write() {
     if (closing_.load()) return;
 
-    std::vector<uint8_t> data;
     {
         std::lock_guard<std::mutex> lock(write_mutex_);
         if (write_queue_.empty()) {
             writing_ = false;
             return;
         }
-        data = std::move(write_queue_.front());
+        write_pending_ = std::move(write_queue_.front());
         write_queue_.pop();
     }
 
     ws_->async_write(
-        net::buffer(data),
+        net::buffer(write_pending_),
         beast::bind_front_handler(&WsClientTransport::on_write, shared_from_this())
     );
 }
@@ -237,19 +236,18 @@ void WsServerSession::on_read(beast::error_code ec, std::size_t bytes) {
 void WsServerSession::do_write() {
     if (!connected_.load()) return;
 
-    std::vector<uint8_t> data;
     {
         std::lock_guard<std::mutex> lock(write_mutex_);
         if (write_queue_.empty()) {
             writing_ = false;
             return;
         }
-        data = std::move(write_queue_.front());
+        write_pending_ = std::move(write_queue_.front());
         write_queue_.pop();
     }
 
     ws_.async_write(
-        net::buffer(data),
+        net::buffer(write_pending_),
         beast::bind_front_handler(&WsServerSession::on_write, shared_from_this())
     );
 }
@@ -325,19 +323,18 @@ void WsPlainServerSession::on_read(beast::error_code ec, std::size_t bytes) {
 void WsPlainServerSession::do_write() {
     if (!connected_.load()) return;
 
-    std::vector<uint8_t> data;
     {
         std::lock_guard<std::mutex> lock(write_mutex_);
         if (write_queue_.empty()) {
             writing_ = false;
             return;
         }
-        data = std::move(write_queue_.front());
+        write_pending_ = std::move(write_queue_.front());
         write_queue_.pop();
     }
 
     ws_.async_write(
-        net::buffer(data),
+        net::buffer(write_pending_),
         beast::bind_front_handler(&WsPlainServerSession::on_write, shared_from_this())
     );
 }

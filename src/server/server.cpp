@@ -6,6 +6,8 @@
 
 #include <thread>
 #include <arpa/inet.h>
+#include <cstdlib>
+#include <fstream>
 
 namespace kirdi::server {
 
@@ -43,6 +45,70 @@ std::string Server::allocate_client_ip() {
     return std::string(buf);
 }
 
+void Server::ensure_system_config() {
+#if defined(__linux__)
+    // ── ip_forward ──────────────────────────────────────────────────────────
+    {
+        std::ifstream f("/proc/sys/net/ipv4/ip_forward");
+        int val = 0;
+        if (f >> val && val == 1) {
+            LOG_INFO("ip_forward already enabled");
+        } else {
+            LOG_WARN("ip_forward is OFF — enabling");
+            std::system("sysctl -w net.ipv4.ip_forward=1 >/dev/null 2>&1");
+        }
+    }
+
+    // ── Detect default outbound interface ───────────────────────────────────
+    std::string iface;
+    {
+        FILE* fp = popen("ip route show default 2>/dev/null | awk '/default/ {print $5}' | head -1", "r");
+        if (fp) {
+            char buf[64] = {};
+            if (fgets(buf, sizeof(buf), fp)) {
+                for (char* p = buf; *p; ++p) if (*p == '\n' || *p == '\r') *p = 0;
+                iface = buf;
+            }
+            pclose(fp);
+        }
+        if (iface.empty()) iface = "eth0";
+    }
+    LOG_INFOF("Default interface: {}", iface);
+
+    // ── FORWARD rules for kirdi TUN ─────────────────────────────────────────
+    auto ensure_rule = [](const std::string& check, const std::string& add, const std::string& desc) {
+        if (std::system(check.c_str()) != 0) {
+            LOG_INFOF("Adding iptables rule: {}", desc);
+            if (std::system(add.c_str()) != 0) {
+                LOG_WARNF("Failed to add rule: {}", desc);
+            }
+        } else {
+            LOG_DEBUGF("iptables rule already present: {}", desc);
+        }
+    };
+
+    ensure_rule(
+        "iptables -C FORWARD -i kirdi0 -j ACCEPT 2>/dev/null",
+        "iptables -A FORWARD -i kirdi0 -j ACCEPT",
+        "FORWARD -i kirdi0 -j ACCEPT"
+    );
+    ensure_rule(
+        "iptables -C FORWARD -o kirdi0 -m state --state RELATED,ESTABLISHED -j ACCEPT 2>/dev/null",
+        "iptables -A FORWARD -o kirdi0 -m state --state RELATED,ESTABLISHED -j ACCEPT",
+        "FORWARD -o kirdi0 RELATED,ESTABLISHED"
+    );
+    ensure_rule(
+        "iptables -t nat -C POSTROUTING -s 10.8.0.0/24 -o " + iface + " -j MASQUERADE 2>/dev/null",
+        "iptables -t nat -A POSTROUTING -s 10.8.0.0/24 -o " + iface + " -j MASQUERADE",
+        "MASQUERADE 10.8.0.0/24 -> " + iface
+    );
+
+    LOG_INFO("System network config verified");
+#else
+    LOG_WARN("ensure_system_config: not on Linux, skipping iptables/sysctl setup");
+#endif
+}
+
 void Server::run() {
     LOG_INFOF("kirdi server v{} starting", KIRDI_VERSION_STRING);
     LOG_INFOF("Config: listen={}:{} tls={} tun_subnet={} tun_ip={} tun_mask={} ws_path={}",
@@ -64,6 +130,9 @@ void Server::run() {
         LOG_ERROR("Failed to create TUN device — aborting");
         return;
     }
+
+    // Ensure iptables FORWARD + MASQUERADE + ip_forward are set
+    ensure_system_config();
 
     // Start TUN read loop in background thread
     std::thread tun_thread([this]() { tun_read_loop(); });
@@ -194,6 +263,7 @@ void Server::register_session(uint32_t sid, const std::string& client_ip,
         .mask = config_.tun_mask,
         .mtu = config_.mtu,
     });
+    session->set_auth_secret(config_.auth_secret);
 
     session->on_ip_packet([this](uint32_t id, std::vector<uint8_t> pkt) {
         if (tun_ && tun_->is_open()) {

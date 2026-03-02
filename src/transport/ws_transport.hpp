@@ -76,6 +76,7 @@ private:
 
     beast::flat_buffer read_buf_;
     std::queue<std::vector<uint8_t>> write_queue_;
+    std::vector<uint8_t> write_pending_;  // buffer for current async_write (must outlive the op)
     std::mutex write_mutex_;
     bool writing_ = false;
 
@@ -118,6 +119,7 @@ private:
 
     beast::flat_buffer read_buf_;
     std::queue<std::vector<uint8_t>> write_queue_;
+    std::vector<uint8_t> write_pending_;
     std::mutex write_mutex_;
     bool writing_ = false;
 
@@ -153,6 +155,7 @@ private:
 
     beast::flat_buffer read_buf_;
     std::queue<std::vector<uint8_t>> write_queue_;
+    std::vector<uint8_t> write_pending_;
     std::mutex write_mutex_;
     bool writing_ = false;
 

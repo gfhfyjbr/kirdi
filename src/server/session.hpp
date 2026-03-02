@@ -33,6 +33,7 @@ public:
 
     // Set server TUN info (sent to client in auth response)
     void set_tun_info(TunInfo info) { tun_info_ = std::move(info); }
+    void set_auth_secret(std::string secret) { auth_secret_ = std::move(secret); }
 
     void send_ip_packet(const uint8_t* data, size_t len);
     void on_ip_packet(OnIpPacketCallback cb) { on_ip_packet_ = std::move(cb); }
@@ -47,6 +48,7 @@ private:
     std::shared_ptr<transport::IWsSession> ws_;
     OnIpPacketCallback on_ip_packet_;
     TunInfo tun_info_;
+    std::string auth_secret_;
 
     void handle_packet(const protocol::PacketHeader& hdr, std::vector<uint8_t> payload);
 };

@@ -100,6 +100,7 @@ void Client::stop() {
     if (ws_) ws_->close();
     ioc_.stop();
 
+    try { teardown_dns(); } catch (...) {}
     try { teardown_routes(); } catch (...) {}
     if (tun_) {
         try { tun_->close(); } catch (...) {}
@@ -108,6 +109,8 @@ void Client::stop() {
 
 void Client::on_connected() {
     LOG_INFO("Connected to server -- sending auth");
+    connected_ = true;
+    reconnect_attempt_ = 0;
     send_auth();
 }
 
@@ -165,6 +168,7 @@ void Client::on_packet(const protocol::PacketHeader& hdr, std::vector<uint8_t> p
 
                     if (config_.auto_route) {
                         setup_routes();
+                        setup_dns();
                     }
 
                     std::thread tun_thread([this]() { tun_read_loop(); });
@@ -182,8 +186,12 @@ void Client::on_packet(const protocol::PacketHeader& hdr, std::vector<uint8_t> p
         }
 
         case protocol::MsgType::IpPacket:
+            LOG_DEBUGF("RX IP packet: {} bytes", payload.size());
             if (tun_ && tun_->is_open()) {
-                tun_->write_packet(payload.data(), payload.size());
+                auto res = tun_->write_packet(payload.data(), payload.size());
+                if (!res) {
+                    LOG_WARNF("TUN write failed for {} byte packet", payload.size());
+                }
             }
             break;
 
@@ -204,6 +212,48 @@ void Client::on_packet(const protocol::PacketHeader& hdr, std::vector<uint8_t> p
 
 void Client::on_error(const std::string& err) {
     LOG_ERRORF("Transport error: {}", err);
+
+    if (!connected_.exchange(false)) return;  // already handling error
+
+    // Clean up TUN and routes but keep running for reconnect
+    try { teardown_dns(); } catch (...) {}
+    try { teardown_routes(); } catch (...) {}
+    if (tun_) {
+        try { tun_->close(); } catch (...) {}
+        tun_.reset();
+    }
+
+    if (running_.load()) {
+        schedule_reconnect();
+    }
+}
+
+void Client::schedule_reconnect() {
+    reconnect_attempt_++;
+    // Exponential backoff: 1s, 2s, 4s, 8s, ... capped at MAX_RECONNECT_DELAY_SEC
+    uint32_t delay = std::min(
+        static_cast<uint32_t>(1u << std::min(reconnect_attempt_ - 1, 5u)),
+        MAX_RECONNECT_DELAY_SEC
+    );
+
+    LOG_INFOF("Reconnecting in {} sec (attempt {})", delay, reconnect_attempt_);
+
+    auto timer = std::make_shared<net::steady_timer>(ioc_);
+    timer->expires_after(std::chrono::seconds(delay));
+    timer->async_wait([this, timer](boost::system::error_code ec) {
+        if (ec || !running_.load()) return;
+
+        LOG_INFO("Attempting reconnection...");
+
+        // Create new transport
+        ws_ = std::make_shared<transport::WsClientTransport>(ioc_, ssl_ctx_);
+        ws_->on_connect([this]() { on_connected(); });
+        ws_->on_packet([this](const protocol::PacketHeader& hdr, std::vector<uint8_t> payload) {
+            on_packet(hdr, std::move(payload));
+        });
+        ws_->on_error([this](const std::string& err) { on_error(err); });
+        ws_->connect(config_.server_host, config_.server_port, config_.ws_path);
+    });
 }
 
 void Client::tun_read_loop() {
@@ -309,6 +359,56 @@ void Client::teardown_routes() {
         std::string cmd = "route -n delete -host " + server_ip_ + " 2>/dev/null || true";
         std::system(cmd.c_str());
     }
+#endif
+}
+
+void Client::setup_dns() {
+    if (config_.dns_server.empty()) return;
+
+    LOG_INFOF("Setting DNS to {}", config_.dns_server);
+
+#if defined(KIRDI_PLATFORM_MACOS)
+    // macOS: use scutil to create a VPN DNS override
+    // SupplementalMatchDomains with empty string = default resolver
+    std::string script =
+        "printf 'd.init\\n"
+        "d.add ServerAddresses * " + config_.dns_server + "\\n"
+        "d.add SupplementalMatchDomains * \\\"\\\"\\n"
+        "set State:/Network/Service/kirdi-vpn/DNS\\n"
+        "quit\\n' | scutil";
+    int ret = std::system(script.c_str());
+    if (ret != 0) {
+        LOG_WARNF("scutil DNS setup returned {}", ret);
+    } else {
+        LOG_INFO("DNS configured via scutil");
+    }
+
+#elif defined(KIRDI_PLATFORM_LINUX)
+    // Linux: backup resolv.conf and write new one
+    std::system("cp /etc/resolv.conf /etc/resolv.conf.kirdi-backup 2>/dev/null || true");
+    std::string cmd = "echo 'nameserver " + config_.dns_server + "' > /etc/resolv.conf";
+    int ret = std::system(cmd.c_str());
+    if (ret != 0) {
+        LOG_WARNF("Failed to set DNS in /etc/resolv.conf (ret={})", ret);
+    } else {
+        LOG_INFO("DNS configured in /etc/resolv.conf");
+    }
+#endif
+}
+
+void Client::teardown_dns() {
+    if (config_.dns_server.empty()) return;
+
+    LOG_INFO("Restoring DNS settings");
+
+#if defined(KIRDI_PLATFORM_MACOS)
+    std::string script =
+        "printf 'remove State:/Network/Service/kirdi-vpn/DNS\\nquit\\n' | scutil";
+    std::system(script.c_str());
+
+#elif defined(KIRDI_PLATFORM_LINUX)
+    std::system("[ -f /etc/resolv.conf.kirdi-backup ] && "
+                "mv /etc/resolv.conf.kirdi-backup /etc/resolv.conf 2>/dev/null || true");
 #endif
 }
 

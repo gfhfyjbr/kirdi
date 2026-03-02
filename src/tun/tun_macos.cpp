@@ -17,9 +17,8 @@
 
 namespace kirdi::tun {
 
-// utun protocol family header (4 bytes, host byte order on macOS)
-static constexpr uint32_t UTUN_AF_INET  = AF_INET;   // 2
-static constexpr uint32_t UTUN_AF_INET6 = AF_INET6;  // 30
+// utun protocol family header (4 bytes, NETWORK byte order per XNU kernel)
+// Kernel does ntohl() on read, htonl() on write — must match.
 static constexpr size_t UTUN_HEADER_SIZE = 4;
 
 MacOSTunDevice::~MacOSTunDevice() {
@@ -123,12 +122,13 @@ std::expected<size_t, TunError> MacOSTunDevice::write_packet(const uint8_t* data
     if (len == 0) return 0;
 
     // Determine AF from IP version field
+    // XNU kernel expects network byte order (does ntohl on input)
     uint8_t ip_ver = (data[0] >> 4) & 0x0F;
     uint32_t af;
     if (ip_ver == 4) {
-        af = UTUN_AF_INET;
+        af = htonl(AF_INET);
     } else if (ip_ver == 6) {
-        af = UTUN_AF_INET6;
+        af = htonl(AF_INET6);
     } else {
         LOG_WARNF("Unknown IP version {} in write_packet", ip_ver);
         return std::unexpected(TunError::WriteFailed);
