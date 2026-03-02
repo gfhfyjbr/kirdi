@@ -104,6 +104,13 @@ void Server::ensure_system_config() {
         "MASQUERADE 10.8.0.0/24 -> " + iface
     );
 
+    // TCP MSS clamping — prevent fragmentation for tunneled TCP
+    ensure_rule(
+        "iptables -t mangle -C FORWARD -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null",
+        "iptables -t mangle -A FORWARD -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu",
+        "MSS clamp-to-pmtu"
+    );
+
     LOG_INFO("System network config verified");
 #else
     LOG_WARN("ensure_system_config: not on Linux, skipping iptables/sysctl setup");

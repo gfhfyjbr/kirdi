@@ -259,6 +259,12 @@ setup_nat() {
         log "NAT правило уже есть"
     fi
 
+    # TCP MSS clamping — prevent fragmentation for tunneled TCP
+    if ! iptables -t mangle -C FORWARD -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null; then
+        iptables -t mangle -A FORWARD -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu
+        log "добавлено MSS clamping правило"
+    fi
+
     # сохраняем iptables
     if command -v netfilter-persistent &>/dev/null; then
         netfilter-persistent save 2>/dev/null || true
