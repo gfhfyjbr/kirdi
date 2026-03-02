@@ -6,9 +6,11 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 # ── Options ──────────────────────────────────────────────────────────────────
-option(KIRDI_BUILD_TESTS   "Build unit tests"          ON)
-option(KIRDI_BUILD_SERVER  "Build server binary"        ON)
-option(KIRDI_BUILD_CLIENT  "Build client binary"        ON)
+option(KIRDI_BUILD_TESTS   "Build unit tests"            ON)
+option(KIRDI_BUILD_SERVER  "Build server binary"          ON)
+option(KIRDI_BUILD_CLIENT  "Build client binary"          ON)
+option(KIRDI_BUILD_GUI     "Build GUI binary (webview)"   OFF)
+option(KIRDI_BUILD_LIB     "Build libkirdi static library" ON)
 
 # ── Dependencies ─────────────────────────────────────────────────────────────
 find_package(Boost 1.81 REQUIRED)
@@ -24,6 +26,22 @@ FetchContent_Declare(
     GIT_SHALLOW    TRUE
 )
 FetchContent_MakeAvailable(nlohmann_json)
+
+# webview for GUI (cross-platform native webview)
+if(KIRDI_BUILD_GUI)
+    set(WEBVIEW_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+    set(WEBVIEW_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+    set(WEBVIEW_BUILD_DOCS OFF CACHE BOOL "" FORCE)
+    set(WEBVIEW_BUILD_SHARED_LIBRARY OFF CACHE BOOL "" FORCE)
+    set(WEBVIEW_BUILD_STATIC_LIBRARY OFF CACHE BOOL "" FORCE)
+    FetchContent_Declare(
+        webview
+        GIT_REPOSITORY https://github.com/webview/webview.git
+        GIT_TAG        0.12.0
+        GIT_SHALLOW    TRUE
+    )
+    FetchContent_MakeAvailable(webview)
+endif()
 
 # ── Common library (shared between server and client) ────────────────────────
 add_library(kirdi_common STATIC
@@ -103,6 +121,103 @@ if(KIRDI_BUILD_CLIENT)
         kirdi_transport
     )
     install(TARGETS kirdi-client RUNTIME DESTINATION bin)
+endif()
+
+# ── libkirdi — C API static library for FFI (Rust/Tauri, etc.) ───────────────
+if(KIRDI_BUILD_LIB)
+    add_library(kirdi STATIC
+        src/libkirdi/kirdi.cpp
+        src/client/client.cpp
+    )
+    target_include_directories(kirdi PUBLIC
+        ${CMAKE_CURRENT_SOURCE_DIR}/include
+        ${CMAKE_CURRENT_SOURCE_DIR}/src
+    )
+    target_link_libraries(kirdi PUBLIC
+        kirdi_common
+        kirdi_tun
+        kirdi_transport
+    )
+    install(TARGETS kirdi ARCHIVE DESTINATION lib)
+    install(FILES include/kirdi/kirdi.h DESTINATION include/kirdi)
+endif()
+
+# ── GUI binary (webview + React) ─────────────────────────────────────────────
+if(KIRDI_BUILD_GUI)
+    # Enable Obj-C++ for .mm files on macOS
+    enable_language(OBJCXX)
+
+    # Build React frontend first
+    add_custom_command(
+        OUTPUT ${CMAKE_CURRENT_SOURCE_DIR}/gui/dist/index.html
+        COMMAND npm run build
+        WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/gui
+        COMMENT "Building React GUI (npm run build)"
+    )
+    add_custom_target(gui_frontend DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/gui/dist/index.html)
+
+    # ── Layer 1: webview static lib (C++17, no kirdi headers) ────────────────
+    add_library(kirdi_webview STATIC
+        ${webview_SOURCE_DIR}/core/src/webview.cc
+    )
+    target_include_directories(kirdi_webview PUBLIC
+        ${webview_SOURCE_DIR}/core/include
+    )
+    target_compile_definitions(kirdi_webview PUBLIC WEBVIEW_STATIC)
+    set_target_properties(kirdi_webview PROPERTIES CXX_STANDARD 17)
+    target_compile_options(kirdi_webview PRIVATE -Wno-deprecated-declarations)
+    if(APPLE)
+        target_link_libraries(kirdi_webview PUBLIC
+            "-framework WebKit"
+            "-framework Cocoa"
+        )
+    endif()
+
+    # ── Layer 2: VPN bridge (C++23, kirdi internals, NO webview) ─────────────
+    add_library(kirdi_gui_bridge STATIC
+        src/gui/gui_bridge.cpp
+        src/client/client.cpp
+    )
+    target_include_directories(kirdi_gui_bridge PUBLIC
+        ${CMAKE_CURRENT_SOURCE_DIR}/include
+        ${CMAKE_CURRENT_SOURCE_DIR}/src
+    )
+    set_target_properties(kirdi_gui_bridge PROPERTIES CXX_STANDARD 23)
+    target_link_libraries(kirdi_gui_bridge PUBLIC
+        kirdi_common
+        kirdi_tun
+        kirdi_transport
+    )
+
+    # ── Layer 3: GUI executable (C++17 .mm + webview + bridge) ───────────────
+    add_executable(kirdi-gui
+        src/gui/main.cpp
+        src/gui/gui_controller.mm
+    )
+    add_dependencies(kirdi-gui gui_frontend)
+
+    # main.cpp is C++17
+    set_source_files_properties(src/gui/main.cpp PROPERTIES
+        COMPILE_OPTIONS "-std=c++17"
+    )
+    # gui_controller.mm is Obj-C++17
+    set_source_files_properties(src/gui/gui_controller.mm PROPERTIES
+        COMPILE_FLAGS "-std=c++17 -ObjC++ -Wno-deprecated-declarations"
+    )
+
+    target_include_directories(kirdi-gui PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/include
+        ${CMAKE_CURRENT_SOURCE_DIR}/src
+        ${webview_SOURCE_DIR}/core/include
+    )
+    target_compile_definitions(kirdi-gui PRIVATE WEBVIEW_STATIC)
+    target_compile_options(kirdi-gui PRIVATE -Wno-deprecated-declarations)
+    target_link_libraries(kirdi-gui PRIVATE
+        kirdi_gui_bridge
+        kirdi_webview
+        nlohmann_json::nlohmann_json
+    )
+    install(TARGETS kirdi-gui RUNTIME DESTINATION bin)
 endif()
 
 # ── Tests ────────────────────────────────────────────────────────────────────

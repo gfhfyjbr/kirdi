@@ -1,0 +1,7 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/kirdi-sys",
+    "crates/kirdi-ffi",
+    "src-tauri",
+]

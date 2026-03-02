@@ -10,25 +10,21 @@
 #include <memory>
 #include <atomic>
 #include <thread>
+#include <functional>
+#include <mutex>
 
 namespace kirdi::client {
 
 namespace net = boost::asio;
 namespace ssl = net::ssl;
 
-// ── Kirdi Client ────────────────────────────────────────────────────────────
-//
-// 1. Connects to server via WebSocket over TLS
-// 2. Authenticates with HMAC token
-// 3. Receives TUN configuration (virtual IP, subnet)
-// 4. Creates local TUN device
-// 5. Bidirectional packet forwarding:
-//    - TUN → read IP packet → wrap in protocol → send via WS
-//    - WS → receive protocol → extract IP packet → write to TUN
-//
-// All local traffic goes through TUN → server → internet.
-// ─────────────────────────────────────────────────────────────────────────────
+// ── GUI Status Callback ─────────────────────────────────────────────────────
+// Called from I/O thread whenever status or stats change.
+// `event` is one of: "connecting", "connected", "disconnected", "error", "reconnecting"
+// `json_data` is a JSON string with additional info (e.g. IPs, error message, attempt)
+using StatusCallback = std::function<void(const std::string& event, const std::string& json_data)>;
 
+// ── Kirdi Client ────────────────────────────────────────────────────────────
 class Client {
 public:
     explicit Client(ClientConfig config);
@@ -36,6 +32,9 @@ public:
 
     void run();
     void stop();
+
+    // GUI integration: set callback for status/stats updates (thread-safe)
+    void set_status_callback(StatusCallback cb);
 
 private:
     ClientConfig config_;
@@ -52,6 +51,11 @@ private:
     std::string original_gateway_;   // Original default gateway (saved before route change)
     uint32_t reconnect_attempt_{0};
     static constexpr uint32_t MAX_RECONNECT_DELAY_SEC = 60;
+
+    // GUI callback
+    StatusCallback status_cb_;
+    std::mutex status_cb_mutex_;
+    void notify_status(const std::string& event, const std::string& json_data = "{}");
 
     // WebSocket callbacks
     void on_connected();

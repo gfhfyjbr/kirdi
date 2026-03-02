@@ -1,0 +1,9 @@
+[package]
+name = "kirdi-sys"
+version = "0.1.0"
+edition = "2021"
+description = "Raw FFI bindings to libkirdi C API"
+links = "kirdi"
+
+[build-dependencies]
+cmake = "0.1"

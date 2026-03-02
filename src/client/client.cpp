@@ -19,6 +19,18 @@ Client::~Client() {
     try { stop(); } catch (...) {}
 }
 
+void Client::set_status_callback(StatusCallback cb) {
+    std::lock_guard lock(status_cb_mutex_);
+    status_cb_ = std::move(cb);
+}
+
+void Client::notify_status(const std::string& event, const std::string& json_data) {
+    std::lock_guard lock(status_cb_mutex_);
+    if (status_cb_) {
+        try { status_cb_(event, json_data); } catch (...) {}
+    }
+}
+
 // Resolve hostname to IP string (needed for route exclusion)
 static std::string resolve_host(const std::string& host) {
     struct addrinfo hints{}, *res = nullptr;
@@ -87,6 +99,7 @@ void Client::run() {
     ws_->on_error([this](const std::string& err) { on_error(err); });
 
     // Connect
+    notify_status("connecting", "{\"host\":\"" + config_.server_host + "\"}");
     ws_->connect(config_.server_host, config_.server_port, config_.ws_path);
 
     // Run I/O context
@@ -97,6 +110,7 @@ void Client::stop() {
     if (!running_.exchange(false)) return;
 
     LOG_INFO("Client stopping");
+    notify_status("disconnected");
 
     if (ws_) ws_->close();
     ioc_.stop();
@@ -112,6 +126,7 @@ void Client::on_connected() {
     LOG_INFO("Connected to server -- sending auth");
     connected_ = true;
     reconnect_attempt_ = 0;
+    notify_status("authenticating");
     send_auth();
 }
 
@@ -176,8 +191,12 @@ void Client::on_packet(const protocol::PacketHeader& hdr, std::vector<uint8_t> p
                     tun_thread.detach();
 
                     LOG_INFO("Tunnel active -- all traffic routed through server");
+                    notify_status("connected",
+                        "{\"clientIp\":\"" + virtual_ip_ + "\","
+                        "\"serverIp\":\"" + config_.server_host + "\"}");
                 } else {
                     LOG_ERROR("Authentication rejected by server");
+                    notify_status("error", "{\"message\":\"Authentication rejected by server\"}");
                     stop();
                 }
             } catch (const std::exception& e) {
@@ -213,6 +232,7 @@ void Client::on_packet(const protocol::PacketHeader& hdr, std::vector<uint8_t> p
 
 void Client::on_error(const std::string& err) {
     LOG_ERRORF("Transport error: {}", err);
+    notify_status("error", "{\"message\":\"" + err + "\"}");
 
     if (!connected_.exchange(false)) return;  // already handling error
 
@@ -238,6 +258,9 @@ void Client::schedule_reconnect() {
     );
 
     LOG_INFOF("Reconnecting in {} sec (attempt {})", delay, reconnect_attempt_);
+    notify_status("reconnecting",
+        "{\"attempt\":" + std::to_string(reconnect_attempt_) +
+        ",\"delay\":" + std::to_string(delay) + "}");
 
     auto timer = std::make_shared<net::steady_timer>(ioc_);
     timer->expires_after(std::chrono::seconds(delay));

@@ -7,3 +7,16 @@ compile_commands.json
 *.so
 *.dylib
 .DS_Store
+
+# Rust / Cargo
+target/
+Cargo.lock
+
+# Tauri
+src-tauri/gen/
+src-tauri/icons/
+
+# Node
+gui/node_modules/
+gui/dist/
+gui/.vite/
