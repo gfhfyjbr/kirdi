@@ -133,4 +133,47 @@ if(KIRDI_BUILD_TESTS)
     )
     include(GoogleTest)
     gtest_discover_tests(kirdi_tests)
+
+    # ── Integration tests (requires root + Linux network namespaces) ─────
+    if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+        add_test(
+            NAME integration_tunnel
+            COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/tests/integration/test_tunnel.sh
+            WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+        )
+        set_tests_properties(integration_tunnel PROPERTIES
+            LABELS "integration"
+            TIMEOUT 180
+            ENVIRONMENT "BUILD_DIR=${CMAKE_BINARY_DIR}"
+        )
+    endif()
+endif()
+
+# ── Convenience targets ──────────────────────────────────────────────────────
+if(KIRDI_BUILD_TESTS)
+    # Run unit tests only
+    add_custom_target(unit_tests
+        COMMAND ${CMAKE_CTEST_COMMAND} --output-on-failure -L unit
+        DEPENDS kirdi_tests
+        WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
+        COMMENT "Running unit tests"
+    )
+
+    # Run integration tests only (requires root)
+    if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+        add_custom_target(integration_tests
+            COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/tests/integration/test_tunnel.sh
+            DEPENDS kirdi-server kirdi-client
+            WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+            COMMENT "Running integration tests (requires root)"
+        )
+    endif()
+
+    # Run all tests
+    add_custom_target(test_all
+        COMMAND ${CMAKE_CTEST_COMMAND} --output-on-failure
+        DEPENDS kirdi_tests
+        WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
+        COMMENT "Running all tests"
+    )
 endif()
