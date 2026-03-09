@@ -49,6 +49,7 @@ private:
     std::atomic<bool> connected_{false};
     std::string virtual_ip_;
     std::string server_ip_;          // Resolved server IP (for route exclusion)
+    std::string server_tun_ip_;      // Server's TUN IP (gateway for Windows routes)
     std::string original_gateway_;   // Original default gateway (saved before route change)
     uint32_t reconnect_attempt_{0};
     static constexpr uint32_t MAX_RECONNECT_DELAY_SEC = 60;

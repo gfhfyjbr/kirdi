@@ -6,9 +6,21 @@
 #include <nlohmann/json.hpp>
 #include <chrono>
 #include <thread>
+
+// ── Platform headers ────────────────────────────────────────────────────────
+#if defined(KIRDI_PLATFORM_WINDOWS)
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <winsock2.h>
+#include <ws2tcpip.h>
+#define popen  _popen
+#define pclose _pclose
+#else
 #include <netdb.h>
 #include <arpa/inet.h>
 #include <poll.h>
+#endif
 
 namespace kirdi::client {
 
@@ -34,19 +46,18 @@ static std::string resolve_host(const std::string& host) {
     return std::string(ip);
 }
 
-// Get current default gateway IP
+// ── Platform-specific: get current default gateway IP ───────────────────────
 static std::string get_default_gateway() {
 #if defined(KIRDI_PLATFORM_MACOS)
-    // macOS: route -n get default
     FILE* fp = popen("route -n get default 2>/dev/null | grep gateway | awk '{print $2}'", "r");
     if (!fp) return "";
     char buf[128] = {};
     if (fgets(buf, sizeof(buf), fp)) {
-        // strip newline
         for (char* p = buf; *p; ++p) if (*p == '\n' || *p == '\r') *p = 0;
     }
     pclose(fp);
     return std::string(buf);
+
 #elif defined(KIRDI_PLATFORM_LINUX)
     FILE* fp = popen("ip route show default 2>/dev/null | awk '/default/ {print $3}'", "r");
     if (!fp) return "";
@@ -56,6 +67,22 @@ static std::string get_default_gateway() {
     }
     pclose(fp);
     return std::string(buf);
+
+#elif defined(KIRDI_PLATFORM_WINDOWS)
+    // PowerShell: query the routing table for the default route's nexthop
+    FILE* fp = popen(
+        "powershell -NoProfile -Command "
+        "\"(Get-NetRoute -DestinationPrefix '0.0.0.0/0' "
+        "| Sort-Object RouteMetric "
+        "| Select-Object -First 1).NextHop\" 2>NUL", "r");
+    if (!fp) return "";
+    char buf[128] = {};
+    if (fgets(buf, sizeof(buf), fp)) {
+        for (char* p = buf; *p; ++p) if (*p == '\n' || *p == '\r') *p = 0;
+    }
+    pclose(fp);
+    return std::string(buf);
+
 #else
     return "";
 #endif
@@ -147,6 +174,9 @@ void Client::on_packet(const protocol::PacketHeader& hdr, std::vector<uint8_t> p
                     std::string server_tun_ip = j.value("tun_server_ip", "10.8.0.1");
                     std::string tun_mask = j.value("tun_mask", "255.255.255.0");
                     uint32_t tun_mtu = j.value("mtu", config_.mtu);
+
+                    // Store server TUN IP for route management (Windows needs it as gateway)
+                    server_tun_ip_ = server_tun_ip;
 
                     LOG_INFOF("Authenticated! VIP={} server_tun={} mask={} mtu={}",
                               virtual_ip_, server_tun_ip, tun_mask, tun_mtu);
@@ -257,16 +287,23 @@ void Client::schedule_reconnect() {
     });
 }
 
+// ── TUN Read Loop ───────────────────────────────────────────────────────────
+
 void Client::tun_read_loop() {
     LOG_INFO("TUN read loop started");
 
     while (running_.load() && tun_ && tun_->is_open()) {
-        // Wait for data on TUN fd instead of polling with sleep
+#if !defined(KIRDI_PLATFORM_WINDOWS)
+        // POSIX: poll the TUN fd for readability before reading.
+        // Avoids busy-waiting when no packets are available.
         struct pollfd pfd{};
         pfd.fd = tun_->native_fd();
         pfd.events = POLLIN;
         int ret = ::poll(&pfd, 1, 100);  // 100ms timeout to check running_ flag
         if (ret <= 0) continue;
+#endif
+        // Windows: read_packet() internally waits via WaitForSingleObject
+        // on the WinTUN read event, so no external poll needed.
 
         auto result = tun_->read_packet();
         if (!result || result.value().empty()) continue;
@@ -279,6 +316,8 @@ void Client::tun_read_loop() {
 
     LOG_INFO("TUN read loop ended");
 }
+
+// ── Route Management ────────────────────────────────────────────────────────
 
 void Client::setup_routes() {
     LOG_INFO("Configuring routes for full tunnel");
@@ -336,6 +375,30 @@ void Client::setup_routes() {
     std::system(cmd.c_str());
 
     LOG_INFO("Routes configured via route command");
+
+#elif defined(KIRDI_PLATFORM_WINDOWS)
+    // 1. Exclude server IP — route directly via original gateway to prevent loop
+    std::string cmd = "route ADD " + server_ip_ + " MASK 255.255.255.255 " + original_gateway_;
+    LOG_DEBUGF("Running: {}", cmd);
+    int ret = std::system(cmd.c_str());
+    if (ret != 0) {
+        LOG_ERRORF("CRITICAL: Failed to add server exclude route (ret={})", ret);
+        LOG_ERROR("Aborting route setup to prevent routing loop");
+        return;
+    }
+
+    // 2. Catch-all routes through TUN (using server's TUN IP as gateway)
+    //    Split 0.0.0.0/0 into 0.0.0.0/1 + 128.0.0.0/1 to override default route
+    //    without deleting it. METRIC 5 ensures these win over typical defaults.
+    cmd = "route ADD 0.0.0.0 MASK 128.0.0.0 " + server_tun_ip_ + " METRIC 5";
+    LOG_DEBUGF("Running: {}", cmd);
+    std::system(cmd.c_str());
+
+    cmd = "route ADD 128.0.0.0 MASK 128.0.0.0 " + server_tun_ip_ + " METRIC 5";
+    LOG_DEBUGF("Running: {}", cmd);
+    std::system(cmd.c_str());
+
+    LOG_INFO("Routes configured via route ADD");
 #endif
 }
 
@@ -351,6 +414,7 @@ void Client::teardown_routes() {
         std::string cmd = "ip route del " + server_ip_ + "/32 2>/dev/null || true";
         std::system(cmd.c_str());
     }
+
 #elif defined(KIRDI_PLATFORM_MACOS)
     std::system("route -n delete -net 0.0.0.0/1 2>/dev/null || true");
     std::system("route -n delete -net 128.0.0.0/1 2>/dev/null || true");
@@ -358,8 +422,19 @@ void Client::teardown_routes() {
         std::string cmd = "route -n delete -host " + server_ip_ + " 2>/dev/null || true";
         std::system(cmd.c_str());
     }
+
+#elif defined(KIRDI_PLATFORM_WINDOWS)
+    // Silently remove routes — errors are expected if routes were already cleaned up
+    std::system("route DELETE 0.0.0.0 MASK 128.0.0.0 >NUL 2>&1");
+    std::system("route DELETE 128.0.0.0 MASK 128.0.0.0 >NUL 2>&1");
+    if (!server_ip_.empty()) {
+        std::string cmd = "route DELETE " + server_ip_ + " MASK 255.255.255.255 >NUL 2>&1";
+        std::system(cmd.c_str());
+    }
 #endif
 }
+
+// ── DNS Management ──────────────────────────────────────────────────────────
 
 void Client::setup_dns() {
     if (config_.dns_server.empty()) return;
@@ -392,6 +467,19 @@ void Client::setup_dns() {
     } else {
         LOG_INFO("DNS configured in /etc/resolv.conf");
     }
+
+#elif defined(KIRDI_PLATFORM_WINDOWS)
+    // Windows: set DNS on the TUN interface via netsh
+    std::string iface = tun_ ? tun_->interface_name() : "kirdi0";
+    std::string cmd = "netsh interface ipv4 set dnsservers name=\"" + iface
+        + "\" static " + config_.dns_server + " primary";
+    LOG_DEBUGF("Running: {}", cmd);
+    int ret = std::system(cmd.c_str());
+    if (ret != 0) {
+        LOG_WARNF("netsh DNS setup returned {}", ret);
+    } else {
+        LOG_INFO("DNS configured via netsh");
+    }
 #endif
 }
 
@@ -408,6 +496,12 @@ void Client::teardown_dns() {
 #elif defined(KIRDI_PLATFORM_LINUX)
     std::system("[ -f /etc/resolv.conf.kirdi-backup ] && "
                 "mv /etc/resolv.conf.kirdi-backup /etc/resolv.conf 2>/dev/null || true");
+
+#elif defined(KIRDI_PLATFORM_WINDOWS)
+    // Restore DNS to DHCP on the TUN interface
+    std::string iface = tun_ ? tun_->interface_name() : "kirdi0";
+    std::string cmd = "netsh interface ipv4 set dnsservers name=\"" + iface + "\" dhcp >NUL 2>&1";
+    std::system(cmd.c_str());
 #endif
 }
 

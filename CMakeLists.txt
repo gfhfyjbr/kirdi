@@ -66,6 +66,11 @@ target_include_directories(kirdi_tun PUBLIC
 )
 target_link_libraries(kirdi_tun PUBLIC kirdi_common)
 
+# Windows: link Winsock and IP helper for networking + route APIs
+if(WIN32)
+    target_link_libraries(kirdi_common PUBLIC ws2_32 iphlpapi)
+endif()
+
 # ── Transport library ────────────────────────────────────────────────────────
 add_library(kirdi_transport STATIC
     src/transport/ws_transport.cpp
