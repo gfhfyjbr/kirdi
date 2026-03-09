@@ -5,6 +5,13 @@ set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
+# MSVC: Boost.Beast / Boost.Asio template-heavy TUs exceed the default
+# COFF section limit (C1128).  Apply /bigobj globally so every target
+# benefits — not just kirdi_transport.
+if(MSVC)
+    add_compile_options(/bigobj)
+endif()
+
 # ── Options ──────────────────────────────────────────────────────────────────
 option(KIRDI_BUILD_TESTS   "Build unit tests"          ON)
 option(KIRDI_BUILD_SERVER  "Build server binary"        ON)
@@ -82,12 +89,6 @@ target_include_directories(kirdi_transport PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/src
 )
 target_link_libraries(kirdi_transport PUBLIC kirdi_common)
-
-# MSVC: ws_transport.cpp generates many COFF sections from Boost.Beast
-# template instantiations — /bigobj raises the section limit.
-if(MSVC)
-    target_compile_options(kirdi_transport PRIVATE /bigobj)
-endif()
 
 # ── Server binary ────────────────────────────────────────────────────────────
 if(KIRDI_BUILD_SERVER)
