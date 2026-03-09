@@ -69,6 +69,8 @@ target_link_libraries(kirdi_tun PUBLIC kirdi_common)
 # Windows: link Winsock and IP helper for networking + route APIs
 if(WIN32)
     target_link_libraries(kirdi_common PUBLIC ws2_32 iphlpapi)
+    # Boost.Asio needs the target Windows version — Windows 7+
+    target_compile_definitions(kirdi_common PUBLIC _WIN32_WINNT=0x0601)
 endif()
 
 # ── Transport library ────────────────────────────────────────────────────────
@@ -80,6 +82,12 @@ target_include_directories(kirdi_transport PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/src
 )
 target_link_libraries(kirdi_transport PUBLIC kirdi_common)
+
+# MSVC: ws_transport.cpp generates many COFF sections from Boost.Beast
+# template instantiations — /bigobj raises the section limit.
+if(MSVC)
+    target_compile_options(kirdi_transport PRIVATE /bigobj)
+endif()
 
 # ── Server binary ────────────────────────────────────────────────────────────
 if(KIRDI_BUILD_SERVER)

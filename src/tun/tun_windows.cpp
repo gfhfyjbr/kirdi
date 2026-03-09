@@ -108,6 +108,9 @@ static std::string win_error_string(DWORD err) {
 
 // ── Lifecycle ───────────────────────────────────────────────────────────────
 
+// Defined out-of-line so unique_ptr<WintunFuncs> can see the complete type.
+WindowsTunDevice::WindowsTunDevice() = default;
+
 WindowsTunDevice::~WindowsTunDevice() {
     close();
     unload_wintun();

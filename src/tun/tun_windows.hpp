@@ -23,7 +23,7 @@ namespace kirdi::tun {
 
 class WindowsTunDevice : public TunDevice {
 public:
-    WindowsTunDevice() = default;
+    WindowsTunDevice();
     ~WindowsTunDevice() override;
 
     // Non-copyable, non-movable (RAII handles)
