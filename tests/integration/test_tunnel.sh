@@ -101,6 +101,7 @@ cleanup() {
     stop_client 2>/dev/null || true
     stop_server 2>/dev/null || true
     teardown_namespaces 2>/dev/null || true
+    cleanup_test_tmp 2>/dev/null || true
     return 0
 }
 trap cleanup EXIT

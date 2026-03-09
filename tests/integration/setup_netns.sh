@@ -119,6 +119,9 @@ setup_namespaces() {
     # Enable ip_forward in server namespace (needed for TUN packet routing)
     ip netns exec "$NS_SERVER" sysctl -qw net.ipv4.ip_forward=1
 
+    # Ensure TEST_TMP exists (teardown may have removed it)
+    mkdir -p "$TEST_TMP"
+
     # Ensure /dev/net/tun exists (required for TUN device creation)
     mkdir -p /dev/net
     [[ -c /dev/net/tun ]] || mknod /dev/net/tun c 10 200
@@ -156,12 +159,14 @@ teardown_namespaces() {
     ip netns del "$NS_SERVER" 2>/dev/null || true
     ip netns del "$NS_CLIENT" 2>/dev/null || true
 
-    # Clean up temp directory
+    echo "[netns] Cleanup complete"
+}
+
+# Separate function to clean temp directory (call only in final cleanup)
+cleanup_test_tmp() {
     if [[ -d "$TEST_TMP" && "$TEST_TMP" == /tmp/kirdi-test.* ]]; then
         rm -rf "$TEST_TMP"
     fi
-
-    echo "[netns] Cleanup complete"
 }
 
 # ── Config Generation ───────────────────────────────────────────────────────

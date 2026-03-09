@@ -212,16 +212,15 @@ void Server::on_accept(beast::error_code ec, tcp::socket socket) {
                     return;
                 }
 
-                auto ws = transport::WsServerSession::ws_stream(std::move(*ssl_stream));
+                auto ws = std::make_shared<transport::WsServerSession::ws_stream>(std::move(*ssl_stream));
 
-                ws.set_option(boost::beast::websocket::stream_base::timeout::suggested(
+                ws->set_option(boost::beast::websocket::stream_base::timeout::suggested(
                     beast::role_type::server
                 ));
-                ws.binary(true);
+                ws->binary(true);
 
-                ws.async_accept(
-                    [this, sid, client_ip,
-                     ws = std::make_shared<transport::WsServerSession::ws_stream>(std::move(ws))]
+                ws->async_accept(
+                    [this, sid, client_ip, ws]
                     (beast::error_code ec) mutable {
                         if (ec) {
                             LOG_WARNF("Session {} WS accept failed: {}", sid, ec.message());
