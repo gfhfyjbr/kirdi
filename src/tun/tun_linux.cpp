@@ -16,13 +16,28 @@
 
 namespace kirdi::tun {
 
+// RAII wrapper for socket fd — prevents leaks in configure_address error paths
+struct ScopedFd {
+    int fd = -1;
+    explicit ScopedFd(int f) : fd(f) {}
+    ~ScopedFd() { if (fd >= 0) ::close(fd); }
+    ScopedFd(const ScopedFd&) = delete;
+    ScopedFd& operator=(const ScopedFd&) = delete;
+    int release() { int f = fd; fd = -1; return f; }
+};
+
 LinuxTunDevice::~LinuxTunDevice() {
     close();
 }
 
 std::expected<void, TunError> LinuxTunDevice::open(const TunConfig& config) {
+    if (fd_ >= 0) {
+        LOG_ERROR("TUN device already open");
+        return std::unexpected(TunError::AlreadyExists);
+    }
+
     // Open /dev/net/tun
-    fd_ = ::open("/dev/net/tun", O_RDWR);
+    fd_ = ::open("/dev/net/tun", O_RDWR | O_CLOEXEC);
     if (fd_ < 0) {
         if (errno == EACCES || errno == EPERM) {
             LOG_ERROR("Permission denied opening /dev/net/tun — need root or CAP_NET_ADMIN");
@@ -32,9 +47,9 @@ std::expected<void, TunError> LinuxTunDevice::open(const TunConfig& config) {
         return std::unexpected(TunError::DeviceNotFound);
     }
 
-    // Configure TUN device
+    // Configure TUN device — IFF_NO_PI strips the 4-byte packet info header
     struct ifreq ifr{};
-    ifr.ifr_flags = IFF_TUN | IFF_NO_PI;  // TUN mode, no packet info header
+    ifr.ifr_flags = IFF_TUN | IFF_NO_PI;
 
     if (!config.name.empty()) {
         std::strncpy(ifr.ifr_name, config.name.c_str(), IFNAMSIZ - 1);
@@ -52,9 +67,20 @@ std::expected<void, TunError> LinuxTunDevice::open(const TunConfig& config) {
 
     LOG_INFOF("TUN device created: {} (fd={})", if_name_, fd_);
 
-    // Set non-blocking for async integration
+    // Set non-blocking for async integration (poll/epoll)
     int flags = fcntl(fd_, F_GETFL, 0);
-    fcntl(fd_, F_SETFL, flags | O_NONBLOCK);
+    if (flags < 0) {
+        LOG_ERRORF("fcntl F_GETFL failed: {}", strerror(errno));
+        ::close(fd_);
+        fd_ = -1;
+        return std::unexpected(TunError::SystemError);
+    }
+    if (fcntl(fd_, F_SETFL, flags | O_NONBLOCK) < 0) {
+        LOG_ERRORF("fcntl F_SETFL O_NONBLOCK failed: {}", strerror(errno));
+        ::close(fd_);
+        fd_ = -1;
+        return std::unexpected(TunError::SystemError);
+    }
 
     // Configure IP address and bring up
     auto result = configure_address(config);
@@ -76,6 +102,10 @@ void LinuxTunDevice::close() {
 }
 
 std::expected<std::vector<uint8_t>, TunError> LinuxTunDevice::read_packet() {
+    if (fd_ < 0) {
+        return std::unexpected(TunError::ReadFailed);
+    }
+
     std::vector<uint8_t> buf(mtu_ + 64);  // Extra space for oversized packets
 
     ssize_t n = ::read(fd_, buf.data(), buf.size());
@@ -92,6 +122,13 @@ std::expected<std::vector<uint8_t>, TunError> LinuxTunDevice::read_packet() {
 }
 
 std::expected<size_t, TunError> LinuxTunDevice::write_packet(const uint8_t* data, size_t len) {
+    if (fd_ < 0) {
+        return std::unexpected(TunError::WriteFailed);
+    }
+    if (data == nullptr || len == 0) {
+        return 0;
+    }
+
     ssize_t n = ::write(fd_, data, len);
     if (n < 0) {
         if (errno == EAGAIN || errno == EWOULDBLOCK) {
@@ -104,58 +141,68 @@ std::expected<size_t, TunError> LinuxTunDevice::write_packet(const uint8_t* data
 }
 
 std::expected<void, TunError> LinuxTunDevice::configure_address(const TunConfig& config) {
-    int sockfd = socket(AF_INET, SOCK_DGRAM, 0);
-    if (sockfd < 0) {
-        LOG_ERRORF("Failed to create socket for TUN config: {}", strerror(errno));
+    int raw_fd = socket(AF_INET, SOCK_DGRAM | SOCK_CLOEXEC, 0);
+    if (raw_fd < 0) {
+        LOG_ERRORF("Failed to create config socket: {}", strerror(errno));
         return std::unexpected(TunError::SystemError);
     }
+    ScopedFd sockfd(raw_fd);
 
+    // Validate MTU range — ifr_mtu is int, typical range 68..65535
+    if (config.mtu < 68 || config.mtu > 65535) {
+        LOG_ERRORF("Invalid MTU {}: must be 68..65535", config.mtu);
+        return std::unexpected(TunError::ConfigFailed);
+    }
+
+    // ── Set IP address ──────────────────────────────────────────────────────
     struct ifreq ifr{};
     std::strncpy(ifr.ifr_name, if_name_.c_str(), IFNAMSIZ - 1);
 
-    // Set IP address
     auto* addr_in = reinterpret_cast<struct sockaddr_in*>(&ifr.ifr_addr);
     addr_in->sin_family = AF_INET;
-    inet_pton(AF_INET, config.address.c_str(), &addr_in->sin_addr);
-
-    if (ioctl(sockfd, SIOCSIFADDR, &ifr) < 0) {
-        LOG_ERRORF("Failed to set TUN address: {}", strerror(errno));
-        ::close(sockfd);
+    if (inet_pton(AF_INET, config.address.c_str(), &addr_in->sin_addr) != 1) {
+        LOG_ERRORF("Invalid TUN address: '{}'", config.address);
         return std::unexpected(TunError::ConfigFailed);
     }
 
-    // Set netmask
+    if (ioctl(sockfd.fd, SIOCSIFADDR, &ifr) < 0) {
+        LOG_ERRORF("Failed to set TUN address '{}': {}", config.address, strerror(errno));
+        return std::unexpected(TunError::ConfigFailed);
+    }
+
+    // ── Set netmask ─────────────────────────────────────────────────────────
+    // Re-zero the sockaddr union (ifr_netmask aliases ifr_addr)
+    std::memset(&ifr.ifr_netmask, 0, sizeof(ifr.ifr_netmask));
     auto* mask_in = reinterpret_cast<struct sockaddr_in*>(&ifr.ifr_netmask);
     mask_in->sin_family = AF_INET;
-    inet_pton(AF_INET, config.netmask.c_str(), &mask_in->sin_addr);
-
-    if (ioctl(sockfd, SIOCSIFNETMASK, &ifr) < 0) {
-        LOG_ERRORF("Failed to set TUN netmask: {}", strerror(errno));
-        ::close(sockfd);
+    if (inet_pton(AF_INET, config.netmask.c_str(), &mask_in->sin_addr) != 1) {
+        LOG_ERRORF("Invalid TUN netmask: '{}'", config.netmask);
         return std::unexpected(TunError::ConfigFailed);
     }
 
-    // Set MTU
+    if (ioctl(sockfd.fd, SIOCSIFNETMASK, &ifr) < 0) {
+        LOG_ERRORF("Failed to set TUN netmask '{}': {}", config.netmask, strerror(errno));
+        return std::unexpected(TunError::ConfigFailed);
+    }
+
+    // ── Set MTU ─────────────────────────────────────────────────────────────
     ifr.ifr_mtu = static_cast<int>(config.mtu);
-    if (ioctl(sockfd, SIOCSIFMTU, &ifr) < 0) {
-        LOG_ERRORF("Failed to set TUN MTU: {}", strerror(errno));
-        ::close(sockfd);
+    if (ioctl(sockfd.fd, SIOCSIFMTU, &ifr) < 0) {
+        LOG_ERRORF("Failed to set TUN MTU {}: {}", config.mtu, strerror(errno));
         return std::unexpected(TunError::ConfigFailed);
     }
 
-    // Bring interface up
-    if (ioctl(sockfd, SIOCGIFFLAGS, &ifr) < 0) {
-        ::close(sockfd);
+    // ── Bring interface up ──────────────────────────────────────────────────
+    if (ioctl(sockfd.fd, SIOCGIFFLAGS, &ifr) < 0) {
+        LOG_ERRORF("Failed to get interface flags: {}", strerror(errno));
         return std::unexpected(TunError::ConfigFailed);
     }
     ifr.ifr_flags |= IFF_UP | IFF_RUNNING;
-    if (ioctl(sockfd, SIOCSIFFLAGS, &ifr) < 0) {
+    if (ioctl(sockfd.fd, SIOCSIFFLAGS, &ifr) < 0) {
         LOG_ERRORF("Failed to bring TUN interface up: {}", strerror(errno));
-        ::close(sockfd);
         return std::unexpected(TunError::ConfigFailed);
     }
 
-    ::close(sockfd);
     LOG_INFOF("TUN {} configured: addr={} mask={} mtu={}",
               if_name_, config.address, config.netmask, config.mtu);
     return {};
