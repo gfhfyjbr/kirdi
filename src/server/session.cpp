@@ -3,8 +3,15 @@
 #include "common/crypto.hpp"
 
 #include <nlohmann/json.hpp>
-#include <arpa/inet.h>
 #include <chrono>
+
+#ifdef _WIN32
+#include <winsock2.h>
+#include <ws2tcpip.h>
+#pragma comment(lib, "ws2_32.lib")
+#else
+#include <arpa/inet.h>
+#endif
 
 namespace kirdi::server {
 

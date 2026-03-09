@@ -5,10 +5,17 @@
 #include <boost/beast/http.hpp>
 
 #include <thread>
-#include <arpa/inet.h>
 #include <cstdlib>
 #include <fstream>
+
+#ifdef _WIN32
+#include <winsock2.h>
+#include <ws2tcpip.h>
+#pragma comment(lib, "ws2_32.lib")
+#else
+#include <arpa/inet.h>
 #include <poll.h>
+#endif
 
 namespace kirdi::server {
 
@@ -302,7 +309,11 @@ void Server::tun_read_loop() {
         struct pollfd pfd{};
         pfd.fd = tun_->native_fd();
         pfd.events = POLLIN;
+#ifdef _WIN32
+        int ret = WSAPoll(&pfd, 1, 100);
+#else
         int ret = ::poll(&pfd, 1, 100);  // 100ms timeout to check tun_->is_open()
+#endif
         if (ret <= 0) continue;
 
         auto result = tun_->read_packet();
